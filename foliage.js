@@ -85,6 +85,29 @@ const grassFragmentShader = `
     }
 `;
 
+const stemFragmentShader = `
+    varying vec2 vUv;
+    varying float vCloud;
+    uniform vec3 uColor;
+
+    void main() {
+        vec3 finalColor = uColor;
+        
+        // Fake shading for 3D cylinder effect using UV wrapping
+        // uV.x goes 0-1 around the cylinder
+        float light = 0.8 + 0.4 * sin(vUv.x * 6.28); 
+        finalColor *= light;
+
+        // Gradient from dark bottom to lighter top
+        finalColor *= mix(0.6, 1.0, vUv.y);
+        
+        // Cloud shadows
+        finalColor *= mix(0.7, 1.2, vCloud);
+        
+        gl_FragColor = vec4(finalColor, 1.0);
+    }
+`;
+
 export function createFoliage(scene, assets, terrainMesh) {
     const instanceCount = 8000;
     const flowerCount = 200;
@@ -112,22 +135,30 @@ export function createFoliage(scene, assets, terrainMesh) {
     grassMesh.castShadow = true;
 
     // --- Flower Setup ---
-    // 1. Stem (Thicker for realism, taller to stand out)
-    const stemHeight = 1.3;
-    const stemGeo = new THREE.PlaneGeometry(0.15, stemHeight, 1, 4);
-    stemGeo.translate(0, stemHeight * 0.5, 0); // Pivot bottom
+    // 1. Stem (3D Cylinder)
+    const stemHeight = 1.1; // Height to reach the flower head
+    // Thin cylinder stem
+    const stemGeo = new THREE.CylinderGeometry(0.02, 0.025, stemHeight, 5);
+    stemGeo.translate(0, stemHeight / 2, 0); // Pivot at bottom
+
+    const stemUniforms = {
+        uTime: { value: 0 },
+        uNoiseTexture: { value: assets.noise },
+        uColor: { value: new THREE.Color(0x66aa55) } // Stems are green
+    };
 
     const stemMat = new THREE.ShaderMaterial({
         vertexShader: grassVertexShader, // Standard grass wind
-        fragmentShader: grassFragmentShader,
-        uniforms: uniforms, // Reuse grass uniforms for stem
+        fragmentShader: stemFragmentShader,
+        uniforms: stemUniforms, 
         side: THREE.DoubleSide
     });
     
     // 2. Head (Flower Sprite)
     const headGeo = new THREE.PlaneGeometry(0.4, 0.4);
-    headGeo.rotateX(-Math.PI / 4); // Tilt slightly for better visibility
-    headGeo.translate(0, stemHeight, 0); // Position exactly at the tip of the stem
+    headGeo.rotateX(-Math.PI / 6); // Tilt back slightly
+    // Position exactly at the top of the stem
+    headGeo.translate(0, stemHeight, 0); 
 
     const headUniforms = {
         uTime: { value: 0 },
@@ -141,8 +172,7 @@ export function createFoliage(scene, assets, terrainMesh) {
         fragmentShader: grassFragmentShader,
         uniforms: headUniforms,
         side: THREE.DoubleSide,
-        transparent: true,
-        depthWrite: true
+        transparent: false 
     });
 
     const stemMesh = new THREE.InstancedMesh(stemGeo, stemMat, flowerCount);
@@ -223,6 +253,7 @@ export function createFoliage(scene, assets, terrainMesh) {
     return {
         update: (time) => {
             uniforms.uTime.value = time;
+            stemUniforms.uTime.value = time;
             headUniforms.uTime.value = time;
         }
     };
