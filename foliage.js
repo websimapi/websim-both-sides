@@ -15,16 +15,16 @@ const grassVertexShader = `
         vec3 instancePos = vec3(instanceMatrix[3][0], instanceMatrix[3][1], instanceMatrix[3][2]);
         
         // Sample noise for wind based on instance root X/Z
-        vec2 noiseUV = instancePos.xz * 0.05 + vec2(uTime * 0.05, uTime * 0.02);
+        vec2 noiseUV = instancePos.xz * 0.03 + vec2(uTime * 0.03, uTime * 0.01);
         float noiseVal = texture2D(uNoiseTexture, noiseUV).r;
         vCloud = noiseVal;
 
         // Wind strength increases with height (uv.y)
-        float windStrength = pow(uv.y, 2.0) * 2.0; 
+        float windStrength = pow(uv.y, 2.0) * 1.2; 
         
-        // Displacement
-        float xDisp = sin(uTime * 1.0 + instancePos.x) * 0.1 + (noiseVal - 0.5) * 1.5;
-        float zDisp = cos(uTime * 0.8 + instancePos.z) * 0.1 + (noiseVal - 0.5) * 1.5;
+        // Displacement - Calmer, slower swaying
+        float xDisp = sin(uTime * 0.6 + instancePos.x * 0.5) * 0.2 + (noiseVal - 0.5) * 0.8;
+        float zDisp = cos(uTime * 0.4 + instancePos.z * 0.5) * 0.2 + (noiseVal - 0.5) * 0.8;
         
         vec3 finalPos = position;
         finalPos.x += xDisp * windStrength;
@@ -47,15 +47,16 @@ const flowerHeadVertexShader = `
         
         vec3 instancePos = vec3(instanceMatrix[3][0], instanceMatrix[3][1], instanceMatrix[3][2]);
         
-        vec2 noiseUV = instancePos.xz * 0.05 + vec2(uTime * 0.05, uTime * 0.02);
+        vec2 noiseUV = instancePos.xz * 0.03 + vec2(uTime * 0.03, uTime * 0.01);
         float noiseVal = texture2D(uNoiseTexture, noiseUV).r;
         vCloud = noiseVal;
 
         // Constant max wind strength matching the stem tip
-        float windStrength = 2.0; 
+        float windStrength = 1.2; 
         
-        float xDisp = sin(uTime * 1.0 + instancePos.x) * 0.1 + (noiseVal - 0.5) * 1.5;
-        float zDisp = cos(uTime * 0.8 + instancePos.z) * 0.1 + (noiseVal - 0.5) * 1.5;
+        // Matches grass displacement for visual sync
+        float xDisp = sin(uTime * 0.6 + instancePos.x * 0.5) * 0.2 + (noiseVal - 0.5) * 0.8;
+        float zDisp = cos(uTime * 0.4 + instancePos.z * 0.5) * 0.2 + (noiseVal - 0.5) * 0.8;
         
         vec3 finalPos = position;
         finalPos.x += xDisp * windStrength;
@@ -111,8 +112,8 @@ export function createFoliage(scene, assets, terrainMesh) {
     grassMesh.castShadow = true;
 
     // --- Flower Setup ---
-    // 1. Stem (Thin Grass)
-    const stemGeo = new THREE.PlaneGeometry(0.08, 1.0, 1, 4);
+    // 1. Stem (Thicker for realism)
+    const stemGeo = new THREE.PlaneGeometry(0.18, 1.0, 1, 4);
     stemGeo.translate(0, 0.5, 0); // Pivot bottom, height 1.0
 
     const stemMat = new THREE.ShaderMaterial({
