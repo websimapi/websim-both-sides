@@ -28,7 +28,7 @@ function createBladeGeometry() {
     return geometry;
 }
 
-// Vertex Shader for Grass Wind (Procedural & Textured)
+ // Vertex Shader for Grass Wind (Procedural & Textured)
 const grassVertexShader = `
     varying vec2 vUv;
     varying float vCloud;
@@ -39,33 +39,47 @@ const grassVertexShader = `
     void main() {
         vUv = uv;
         
+        // World-space instance position (per blade)
         vec3 instancePos = vec3(instanceMatrix[3][0], instanceMatrix[3][1], instanceMatrix[3][2]);
         
-        // Smooth, large-scale noise for gusts
-        // Slower time scale and larger texture sampling for natural transitions
-        vec2 noiseUV = instancePos.xz * 0.015 + vec2(uTime * 0.04, uTime * 0.01);
+        // --- Large-scale noise field for soft gust zones ---
+        // Slow-moving UVs for big, lazy patches of wind
+        vec2 noiseUV = instancePos.xz * 0.01 + vec2(uTime * 0.015, uTime * 0.008);
         float noiseVal = texture2D(uNoiseTexture, noiseUV).r;
         vCloud = noiseVal;
 
-        // Gust curve: Smoothstep creates defined 'calm' and 'windy' patches
-        float gust = smoothstep(0.2, 0.7, noiseVal);
+        // Convert noise into "gust strength" with soft edges
+        float gust = smoothstep(0.35, 0.75, noiseVal);
 
-        // Wind Physics Layers:
-        // 1. Base Breeze: Slow, constant, gentle sine wave
-        float baseSway = sin(uTime * 0.3 + instancePos.x * 0.2 + instancePos.z * 0.1) * 0.15;
+        // --- Time-varying wind direction (slowly drifting) ---
+        float baseAngle = 1.2; // base direction in radians (roughly from left to right)
+        float dirJitter = 0.4 * sin(uTime * 0.03); // very slow oscillation
+        float angle = baseAngle + dirJitter;
+        vec2 windDir = normalize(vec2(cos(angle), sin(angle)));
+
+        // --- Motion layers (all low-frequency, smooth) ---
+
+        // 1. Steady breeze: dominant, directional push
+        float steadyPhase = uTime * 0.25 + (instancePos.x + instancePos.z) * 0.05;
+        float steadyStrength = 0.18 + 0.04 * sin(steadyPhase);
         
-        // 2. Gust Push: Directional force based on noise
-        float gustPush = gust * 0.4;
-        
-        // 3. Micro-Turbulence: Faster, small jitters (damped significantly)
-        float turbulence = sin(uTime * 1.2 + instancePos.x * 1.0) * 0.03 * (1.0 + gust);
+        // 2. Gust modulation: gently raises/lowers the steady breeze strength
+        float gustPhase = uTime * 0.12;
+        float gustWave = 0.5 + 0.5 * sin(gustPhase + noiseVal * 6.2831);
+        float gustStrength = mix(0.0, 0.22, gust * gustWave);
 
-        // Composite Wind Vector
-        float windX = baseSway + gustPush + turbulence;
-        float windZ = cos(uTime * 0.2 + instancePos.x * 0.1) * 0.05 + (gustPush * 0.2);
+        // 3. Very subtle local variation along the field (removes uniformity without jitter)
+        float fieldVariation = 0.03 * sin(uTime * 0.35 + instancePos.x * 0.15) * 
+                               0.03 * cos(uTime * 0.31 + instancePos.z * 0.11);
 
-        // Stiffness Gradient: Bottom is fixed (0.0), Top is flexible (1.0)
-        float stiffness = pow(uv.y, 2.0);
+        float totalStrength = steadyStrength + gustStrength + fieldVariation;
+
+        // Final wind vector in XZ plane
+        float windX = windDir.x * totalStrength;
+        float windZ = windDir.y * totalStrength;
+
+        // Stiffness gradient: base locked, tips fully flexible (smooth cubic)
+        float stiffness = pow(uv.y, 3.0);
         
         vec3 finalPos = position;
         finalPos.x += windX * stiffness;
@@ -75,7 +89,7 @@ const grassVertexShader = `
     }
 `;
 
-// Vertex Shader for Flower Head (Matches grass movement)
+ // Vertex Shader for Flower Head (Matches grass movement)
 const flowerHeadVertexShader = `
     varying vec2 vUv;
     varying float vCloud;
@@ -88,22 +102,35 @@ const flowerHeadVertexShader = `
         
         vec3 instancePos = vec3(instanceMatrix[3][0], instanceMatrix[3][1], instanceMatrix[3][2]);
         
-        // --- Shared Wind Logic (Must match grassVertexShader exactly) ---
-        vec2 noiseUV = instancePos.xz * 0.015 + vec2(uTime * 0.04, uTime * 0.01);
+        // --- Shared Wind Logic (kept in sync with grassVertexShader) ---
+        vec2 noiseUV = instancePos.xz * 0.01 + vec2(uTime * 0.015, uTime * 0.008);
         float noiseVal = texture2D(uNoiseTexture, noiseUV).r;
         vCloud = noiseVal;
 
-        float gust = smoothstep(0.2, 0.7, noiseVal);
+        float gust = smoothstep(0.35, 0.75, noiseVal);
 
-        float baseSway = sin(uTime * 0.3 + instancePos.x * 0.2 + instancePos.z * 0.1) * 0.15;
-        float gustPush = gust * 0.4;
-        float turbulence = sin(uTime * 1.2 + instancePos.x * 1.0) * 0.03 * (1.0 + gust);
+        float baseAngle = 1.2;
+        float dirJitter = 0.4 * sin(uTime * 0.03);
+        float angle = baseAngle + dirJitter;
+        vec2 windDir = normalize(vec2(cos(angle), sin(angle)));
 
-        float windX = baseSway + gustPush + turbulence;
-        float windZ = cos(uTime * 0.2 + instancePos.x * 0.1) * 0.05 + (gustPush * 0.2);
+        float steadyPhase = uTime * 0.25 + (instancePos.x + instancePos.z) * 0.05;
+        float steadyStrength = 0.18 + 0.04 * sin(steadyPhase);
+        
+        float gustPhase = uTime * 0.12;
+        float gustWave = 0.5 + 0.5 * sin(gustPhase + noiseVal * 6.2831);
+        float gustStrength = mix(0.0, 0.22, gust * gustWave);
+
+        float fieldVariation = 0.03 * sin(uTime * 0.35 + instancePos.x * 0.15) * 
+                               0.03 * cos(uTime * 0.31 + instancePos.z * 0.11);
+
+        float totalStrength = steadyStrength + gustStrength + fieldVariation;
+
+        float windX = windDir.x * totalStrength;
+        float windZ = windDir.y * totalStrength;
         // ---------------------------------------------------------------
 
-        // Flowers are at the top of the stem, so they get 100% of the tip deflection
+        // Flowers are at the very tip: they receive full deflection
         float stiffness = 1.0; 
         
         vec3 finalPos = position;
