@@ -2,24 +2,24 @@ import * as THREE from 'three';
 
 // Helper to create tapered grass blade geometry
 function createBladeGeometry() {
-    // Width 0.12, Height 1.0, 5 vertical segments for smoother bending
-    const geometry = new THREE.PlaneGeometry(0.12, 1.0, 1, 5);
-    geometry.translate(0, 0.5, 0); // Pivot at bottom
+    // Width 0.16, Height 1.15, 5 vertical segments for smoother bending
+    const geometry = new THREE.PlaneGeometry(0.16, 1.15, 1, 5);
+    geometry.translate(0, 0.575, 0); // Pivot at bottom
 
     const pos = geometry.attributes.position;
     for (let i = 0; i < pos.count; i++) {
         const y = pos.getY(i);
-        const u = y / 1.0; // Normalized height
+        const u = y / 1.15; // Normalized height
         
         // Taper Width: Convex curve for a grassy blade shape
-        const taper = 1.0 - Math.pow(u, 2.0) * 0.6 - u * 0.4;
+        const taper = 1.0 - Math.pow(u, 2.0) * 0.5 - u * 0.5;
         
         let x = pos.getX(i);
         pos.setX(i, x * taper);
         
         // Add natural static curve (bend slightly forward/back)
         // Helps it catch light better
-        const curve = 0.2 * Math.pow(u, 2.0);
+        const curve = 0.25 * Math.pow(u, 2.0);
         pos.setZ(i, curve);
     }
     
@@ -32,52 +32,67 @@ const windShaderLogic = `
     uniform float uTime;
     uniform sampler2D uNoiseTexture;
 
+    // Simulates a smooth, non-jittery wind field
     vec3 getWindDisplacement(vec3 position, vec3 instancePos, float stiffness) {
-        // --- Wind Settings ---
-        vec2 windDir = normalize(vec2(0.6, 0.3)); // Dominant wind direction
-        float windSpeed = 0.12; // Slow, realistic breeze
-        float noiseScale = 0.035; // Larger scale = larger "waves"
+        
+        // 1. Time-varying Direction
+        // Wind slowly shifts direction (swirls) over time for natural variation
+        float timeScale = uTime * 0.1;
+        vec2 mainDir = normalize(vec2(cos(timeScale * 0.3), sin(timeScale * 0.2)));
+        
+        // 2. Multi-layered Noise Sampling
+        // Layer A: Macro Gusts (Large, slow moving waves)
+        vec2 uvMacro = (instancePos.xz * 0.012) - (mainDir * uTime * 0.06);
+        float gust = texture2D(uNoiseTexture, uvMacro).r;
+        
+        // Layer B: Micro Variance (Breaks up uniformity, but keeps it smooth)
+        vec2 uvMicro = (instancePos.xz * 0.04) - (mainDir * uTime * 0.1);
+        float micro = texture2D(uNoiseTexture, uvMicro).r;
+        
+        // Combine for organic feel
+        // "Remap" noise to create pauses (calm) and surges (windy)
+        float combined = (gust * 0.8 + micro * 0.2);
+        float windStrength = smoothstep(0.2, 0.9, combined);
+        
+        // Add a base breeze so nothing is ever totally frozen
+        windStrength = 0.05 + windStrength * 0.8;
+        
+        // 3. Flow Waves
+        // Adds a rhythmic "ripple" moving across the field
+        float wave = sin(dot(instancePos.xz, mainDir) * 0.15 - uTime * 0.8);
+        windStrength *= (0.85 + 0.15 * wave);
 
-        // --- Sampling ---
-        // Scroll the noise texture along the wind direction
-        vec2 uv = instancePos.xz * noiseScale - windDir * uTime * windSpeed;
-        
-        // Sample two noise layers for turbulence
-        // Layer 1: Main waves
-        float nMain = texture2D(uNoiseTexture, uv).r;
-        // Layer 2: Faster, smaller ripples
-        float nTurb = texture2D(uNoiseTexture, uv * 2.7 + vec2(uTime * 0.05)).r;
-        
-        // Combine noise: dominantly the main wave, subtly the turbulence
-        float combinedNoise = nMain * 0.7 + nTurb * 0.3;
-        
-        // Shape the wind strength
-        // "Power" function makes gusts peakier and calms flat areas
-        float strength = pow(combinedNoise, 2.0) * 1.5 + 0.2; 
-        
-        // --- Directional Variance ---
-        // Wind isn't perfectly unidirectional. It swirls.
-        float localSwirl = sin(uTime * 0.2 + instancePos.x * 0.1 + instancePos.z * 0.1);
-        vec2 localDir = normalize(windDir + vec2(localSwirl * 0.3, -localSwirl * 0.1));
+        // 4. Directional Swirl
+        // Grass doesn't just bend straight; it swirls slightly in gusts
+        float swirl = (micro - 0.5) * 0.8; 
+        vec2 localDir = mainDir;
+        // Rotate localDir slightly based on swirl
+        float sa = sin(swirl * 0.4); 
+        float ca = cos(swirl * 0.4);
+        localDir = vec2(localDir.x * ca - localDir.y * sa, localDir.x * sa + localDir.y * ca);
 
-        // --- Displacement ---
-        // Apply wind strength
-        vec3 windVec = vec3(localDir.x, 0.0, localDir.y) * strength;
+        // 5. Calculate Final Displacement
+        // Max bend amount
+        float maxBend = 0.9;
         
-        // Apply stiffness (how much this specific vertex can move)
-        // Typically stiffness is based on height^2 or height^3
-        vec3 disp = windVec * stiffness;
+        vec3 windVec = vec3(localDir.x, 0.0, localDir.y) * windStrength * maxBend;
         
-        // Cheap bending approximation (preserves length visually)
-        // As xz movement increases, y should decrease slightly
-        disp.y = -length(windVec) * 0.4 * stiffness;
+        // Apply Stiffness
+        vec3 finalDisp = windVec * stiffness;
         
-        return disp;
+        // 6. Vertical Compensation
+        // Bend down as we move out (preserve length visual hack)
+        float dist = length(finalDisp.xz);
+        finalDisp.y = -dist * dist * 0.5; // Quadratic falloff
+        
+        return finalDisp;
     }
     
     float getCloudShadow(vec3 instancePos) {
-        vec2 uv = instancePos.xz * 0.02 + vec2(uTime * 0.02);
-        return smoothstep(0.3, 0.7, texture2D(uNoiseTexture, uv).r);
+        // Softer, larger cloud shadows
+        vec2 uv = instancePos.xz * 0.01 + vec2(uTime * 0.02);
+        float val = texture2D(uNoiseTexture, uv).r;
+        return smoothstep(0.1, 0.9, val);
     }
 `;
 
@@ -190,8 +205,8 @@ export function createFoliage(scene, assets, terrainMesh) {
         uTime: { value: 0 },
         uNoiseTexture: { value: assets.noise },
         // More realistic, less saturated, earthy greens
-        uColorBottom: { value: new THREE.Color(0x1a331a) }, 
-        uColorTop: { value: new THREE.Color(0x5a8a4a) }     
+        uColorBottom: { value: new THREE.Color(0x112211) }, 
+        uColorTop: { value: new THREE.Color(0x4a7a3a) }     
     };
 
     const grassMat = new THREE.ShaderMaterial({
@@ -214,7 +229,7 @@ export function createFoliage(scene, assets, terrainMesh) {
     const stemUniforms = {
         uTime: { value: 0 },
         uNoiseTexture: { value: assets.noise },
-        uColor: { value: new THREE.Color(0x3a5a2a) } // Darker, richer stem green
+        uColor: { value: new THREE.Color(0x2a4a2a) } // Darker, richer stem green
     };
 
     const stemMat = new THREE.ShaderMaterial({
