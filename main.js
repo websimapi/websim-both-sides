@@ -65,7 +65,6 @@ const textureLoader = new THREE.TextureLoader();
 
 // Load Assets
 const assets = {
-    grass: textureLoader.load('grass_blade.png'),
     flower: textureLoader.load('flower_sprite.png'),
     terrain: textureLoader.load('terrain_texture.png'),
     noise: textureLoader.load('wind_noise.png')
