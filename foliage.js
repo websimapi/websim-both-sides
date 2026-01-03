@@ -112,9 +112,10 @@ export function createFoliage(scene, assets, terrainMesh) {
     grassMesh.castShadow = true;
 
     // --- Flower Setup ---
-    // 1. Stem (Thicker for realism)
-    const stemGeo = new THREE.PlaneGeometry(0.18, 1.0, 1, 4);
-    stemGeo.translate(0, 0.5, 0); // Pivot bottom, height 1.0
+    // 1. Stem (Thicker for realism, taller to stand out)
+    const stemHeight = 1.3;
+    const stemGeo = new THREE.PlaneGeometry(0.15, stemHeight, 1, 4);
+    stemGeo.translate(0, stemHeight * 0.5, 0); // Pivot bottom
 
     const stemMat = new THREE.ShaderMaterial({
         vertexShader: grassVertexShader, // Standard grass wind
@@ -125,8 +126,8 @@ export function createFoliage(scene, assets, terrainMesh) {
     
     // 2. Head (Flower Sprite)
     const headGeo = new THREE.PlaneGeometry(0.4, 0.4);
-    headGeo.rotateX(-Math.PI / 6); // Tilt back slightly
-    headGeo.translate(0, 1.0 + 0.15, 0); // Position on top of stem
+    headGeo.rotateX(-Math.PI / 4); // Tilt slightly for better visibility
+    headGeo.translate(0, stemHeight, 0); // Position exactly at the tip of the stem
 
     const headUniforms = {
         uTime: { value: 0 },
@@ -140,7 +141,8 @@ export function createFoliage(scene, assets, terrainMesh) {
         fragmentShader: grassFragmentShader,
         uniforms: headUniforms,
         side: THREE.DoubleSide,
-        transparent: false 
+        transparent: true,
+        depthWrite: true
     });
 
     const stemMesh = new THREE.InstancedMesh(stemGeo, stemMat, flowerCount);
