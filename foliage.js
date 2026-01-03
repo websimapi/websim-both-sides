@@ -27,72 +27,63 @@ function createBladeGeometry() {
     return geometry;
 }
 
-// Shared wind logic to ensure grass, stems, and flowers move in sync
+// Improved wind logic: Smoother, less jittery, clearer direction
 const windShaderLogic = `
     uniform float uTime;
     uniform sampler2D uNoiseTexture;
+    uniform vec2 uWindDirection; // Controlled by JS for smooth rotation
+    uniform float uWindStrength;
 
-    // Simulates a smooth, non-jittery wind field
     vec3 getWindDisplacement(vec3 position, vec3 instancePos, float stiffness) {
         
-        // 1. Time-varying Direction
-        // Wind slowly shifts direction (swirls) over time for natural variation
-        float timeScale = uTime * 0.1;
-        vec2 mainDir = normalize(vec2(cos(timeScale * 0.3), sin(timeScale * 0.2)));
+        // 1. Create a flow coordinate
+        // This moves the noise texture along the wind direction
+        vec2 flowUV = (instancePos.xz * 0.03) - (uWindDirection * uTime * 0.1);
         
-        // 2. Multi-layered Noise Sampling
-        // Layer A: Macro Gusts (Large, slow moving waves)
-        vec2 uvMacro = (instancePos.xz * 0.012) - (mainDir * uTime * 0.06);
-        float gust = texture2D(uNoiseTexture, uvMacro).r;
+        // 2. Sample low-frequency noise (Gusts)
+        float noise = texture2D(uNoiseTexture, flowUV).r;
         
-        // Layer B: Micro Variance (Breaks up uniformity, but keeps it smooth)
-        vec2 uvMicro = (instancePos.xz * 0.04) - (mainDir * uTime * 0.1);
-        float micro = texture2D(uNoiseTexture, uvMicro).r;
+        // 3. Smooth the noise (Remap 0..1 to softer transitions)
+        // This removes the "twitchy" look of raw Perlin noise
+        float gust = smoothstep(0.3, 0.8, noise);
         
-        // Combine for organic feel
-        // "Remap" noise to create pauses (calm) and surges (windy)
-        float combined = (gust * 0.8 + micro * 0.2);
-        float windStrength = smoothstep(0.2, 0.9, combined);
+        // 4. Calculate local wind intensity
+        // Base breeze + Gusts
+        float intensity = 0.1 + gust * 0.9;
         
-        // Add a base breeze so nothing is ever totally frozen
-        windStrength = 0.05 + windStrength * 0.8;
+        // 5. Directional Variance
+        // Grass shouldn't move in lockstep. Add slight deviation based on position.
+        // But keep it coherent! No random jitter.
+        float localAngle = (noise - 0.5) * 0.5; // +/- 0.25 rad
+        float c = cos(localAngle);
+        float s = sin(localAngle);
+        vec2 localDir = vec2(
+            uWindDirection.x * c - uWindDirection.y * s,
+            uWindDirection.x * s + uWindDirection.y * c
+        );
         
-        // 3. Flow Waves
-        // Adds a rhythmic "ripple" moving across the field
-        float wave = sin(dot(instancePos.xz, mainDir) * 0.15 - uTime * 0.8);
-        windStrength *= (0.85 + 0.15 * wave);
-
-        // 4. Directional Swirl
-        // Grass doesn't just bend straight; it swirls slightly in gusts
-        float swirl = (micro - 0.5) * 0.8; 
-        vec2 localDir = mainDir;
-        // Rotate localDir slightly based on swirl
-        float sa = sin(swirl * 0.4); 
-        float ca = cos(swirl * 0.4);
-        localDir = vec2(localDir.x * ca - localDir.y * sa, localDir.x * sa + localDir.y * ca);
-
-        // 5. Calculate Final Displacement
-        // Max bend amount
-        float maxBend = 0.9;
+        // 6. Calculate Displacement Vector
+        // Max bend distance
+        float maxBend = 1.2 * uWindStrength;
         
-        vec3 windVec = vec3(localDir.x, 0.0, localDir.y) * windStrength * maxBend;
+        vec3 displacement = vec3(localDir.x, 0.0, localDir.y) * intensity * maxBend;
         
-        // Apply Stiffness
-        vec3 finalDisp = windVec * stiffness;
+        // 7. Apply Stiffness (Bend more at top)
+        displacement *= stiffness;
         
-        // 6. Vertical Compensation
-        // Bend down as we move out (preserve length visual hack)
-        float dist = length(finalDisp.xz);
-        finalDisp.y = -dist * dist * 0.5; // Quadratic falloff
+        // 8. Vertical Compensation (The "Arc")
+        // As grass bends over, it must lower in Y to maintain length
+        float dist = length(displacement.xz);
+        // Approximation of arc: y = -x^2
+        displacement.y = -dist * dist * 0.4;
         
-        return finalDisp;
+        return displacement;
     }
     
     float getCloudShadow(vec3 instancePos) {
-        // Softer, larger cloud shadows
-        vec2 uv = instancePos.xz * 0.01 + vec2(uTime * 0.02);
+        vec2 uv = instancePos.xz * 0.005 + (uWindDirection * uTime * 0.05);
         float val = texture2D(uNoiseTexture, uv).r;
-        return smoothstep(0.1, 0.9, val);
+        return smoothstep(0.2, 0.9, val);
     }
 `;
 
@@ -108,11 +99,9 @@ const grassVertexShader = `
         vec3 instancePos = vec3(instanceMatrix[3][0], instanceMatrix[3][1], instanceMatrix[3][2]);
         vShadow = getCloudShadow(instancePos);
         
-        // Calculate stiffness based on height (uv.y)
-        // Base is rigid (0), tip is loose (1)
-        float stiffness = pow(uv.y, 2.5);
+        // Stiffness gradient: rigid at bottom, loose at top
+        float stiffness = pow(uv.y, 2.0);
         
-        // Get displacement
         vec3 windOffset = getWindDisplacement(position, instancePos, stiffness);
         
         vec3 finalPos = position + windOffset;
@@ -133,9 +122,7 @@ const flowerHeadVertexShader = `
         vec3 instancePos = vec3(instanceMatrix[3][0], instanceMatrix[3][1], instanceMatrix[3][2]);
         vShadow = getCloudShadow(instancePos);
         
-        // Flower heads are at the very top of the stem.
-        // The stem bends based on height. The top of the stem has max stiffness.
-        // So the head must also have max stiffness to stick to the stem tip.
+        // Flower heads are at the tip of the stem (max height)
         float stiffness = 1.0; 
         
         vec3 windOffset = getWindDisplacement(position, instancePos, stiffness);
@@ -146,6 +133,7 @@ const flowerHeadVertexShader = `
     }
 `;
 
+// Fragments remain mostly the same, just keeping them clean
 const grassFragmentShader = `
     varying vec2 vUv;
     varying float vShadow;
@@ -155,16 +143,11 @@ const grassFragmentShader = `
 
     void main() {
         vec3 color = mix(uColorBottom, uColorTop, vUv.y);
+        color *= mix(0.4, 1.1, vShadow);
+        color *= smoothstep(0.0, 0.1, vUv.y); // AO
         
-        // Add subtle variations based on shadow
-        color *= mix(0.5, 1.1, vShadow);
-        
-        // Fake Ambient Occlusion
-        color *= smoothstep(0.0, 0.1, vUv.y);
-        
-        // Specular sheen for "realism"
-        // Simple trick: lighter top tips
-        float sheen = smoothstep(0.8, 1.0, vUv.y) * 0.2;
+        // Simple specular
+        float sheen = smoothstep(0.7, 1.0, vUv.y) * 0.15;
         color += sheen;
 
         gl_FragColor = vec4(color, 1.0);
@@ -179,123 +162,175 @@ const stemFragmentShader = `
     void main() {
         vec3 finalColor = uColor;
         
-        // Cylinder shading approximation
-        // vUv.x wraps 0..1 around the cylinder
+        // Simple cylindrical lighting
         float light = 0.5 + 0.5 * sin((vUv.x + 0.25) * 6.28); 
-        finalColor *= 0.5 + 0.5 * light; // Soft lighting
+        finalColor *= 0.6 + 0.4 * light;
 
-        // Vertical gradient
         finalColor *= mix(0.6, 1.0, vUv.y);
-        
-        // Cloud shadow
         finalColor *= mix(0.5, 1.1, vShadow);
         
         gl_FragColor = vec4(finalColor, 1.0);
     }
 `;
 
+const flowerHeadFragmentShader = `
+    varying vec2 vUv;
+    varying float vShadow;
+    uniform sampler2D uMap;
+    uniform vec3 uColor;
+    void main() {
+        vec4 texColor = texture2D(uMap, vUv);
+        if (texColor.a < 0.4) discard;
+        
+        vec3 finalColor = texColor.rgb * uColor;
+        finalColor *= mix(0.6, 1.1, vShadow);
+        
+        gl_FragColor = vec4(finalColor, texColor.a);
+    }
+`;
+
+// Frustum Culling Optimization: Chunking
+// We split the world into a grid. Each cell is a separate InstancedMesh.
+// Three.js automatically culls meshes whose bounding spheres are off-screen.
+class FoliageChunk {
+    constructor(scene, grassGeo, grassMat, stemGeo, stemMat, headGeo, headMat, xOffset, zOffset, size) {
+        this.items = [];
+        this.flowers = [];
+        this.x = xOffset;
+        this.z = zOffset;
+        this.size = size;
+        
+        this.scene = scene;
+        this.grassGeo = grassGeo;
+        this.grassMat = grassMat;
+        this.stemGeo = stemGeo;
+        this.stemMat = stemMat;
+        this.headGeo = headGeo;
+        this.headMat = headMat;
+    }
+
+    addGrass(matrix) {
+        this.items.push(matrix);
+    }
+
+    addFlower(matrix) {
+        this.flowers.push(matrix);
+    }
+
+    build() {
+        if (this.items.length > 0) {
+            this.grassMesh = new THREE.InstancedMesh(this.grassGeo, this.grassMat, this.items.length);
+            this.grassMesh.receiveShadow = true;
+            this.grassMesh.castShadow = true;
+            
+            for (let i = 0; i < this.items.length; i++) {
+                this.grassMesh.setMatrixAt(i, this.items[i]);
+            }
+            this.grassMesh.instanceMatrix.needsUpdate = true;
+            
+            // Critical for culling: Set bounding volume correctly
+            this.grassMesh.computeBoundingSphere();
+            this.scene.add(this.grassMesh);
+        }
+
+        if (this.flowers.length > 0) {
+            this.stemMesh = new THREE.InstancedMesh(this.stemGeo, this.stemMat, this.flowers.length);
+            this.stemMesh.receiveShadow = true;
+            this.stemMesh.castShadow = true;
+            
+            this.headMesh = new THREE.InstancedMesh(this.headGeo, this.headMat, this.flowers.length);
+            this.headMesh.castShadow = true;
+            // No receive shadow on billboard flowers to avoid self-shadow artifacts usually
+
+            for (let i = 0; i < this.flowers.length; i++) {
+                this.stemMesh.setMatrixAt(i, this.flowers[i]);
+                this.headMesh.setMatrixAt(i, this.flowers[i]);
+            }
+            this.stemMesh.instanceMatrix.needsUpdate = true;
+            this.headMesh.instanceMatrix.needsUpdate = true;
+            
+            this.stemMesh.computeBoundingSphere();
+            this.headMesh.computeBoundingSphere();
+
+            this.scene.add(this.stemMesh);
+            this.scene.add(this.headMesh);
+        }
+    }
+}
+
 export function createFoliage(scene, assets, terrainMesh) {
-    const instanceCount = 25000; // Increased count for lush AAA density
-    const flowerCount = 200;
-
-    // --- Grass Setup ---
-    const grassGeo = createBladeGeometry();
-
-    const uniforms = {
+    const GRASS_COUNT = 35000; // Even more dense since culling is active!
+    const FLOWER_COUNT = 300;
+    
+    // Grid settings
+    const CHUNK_SIZE = 15; // 60x60 terrain -> 4x4 chunks of 15x15
+    const GRID_HALF_WIDTH = 30;
+    
+    // Shared Materials
+    const sharedUniforms = {
         uTime: { value: 0 },
         uNoiseTexture: { value: assets.noise },
-        // More realistic, less saturated, earthy greens
-        uColorBottom: { value: new THREE.Color(0x112211) }, 
-        uColorTop: { value: new THREE.Color(0x4a7a3a) }     
+        uWindDirection: { value: new THREE.Vector2(1, 0) },
+        uWindStrength: { value: 1.0 },
+        uColorBottom: { value: new THREE.Color(0x1a2e1a) }, 
+        uColorTop: { value: new THREE.Color(0x5c8a4b) },
+        uColor: { value: new THREE.Color(0x3a5a3a) }, // Stem color
+        uMap: { value: assets.flower }
     };
 
+    const grassGeo = createBladeGeometry();
     const grassMat = new THREE.ShaderMaterial({
         vertexShader: grassVertexShader,
         fragmentShader: grassFragmentShader,
-        uniforms: uniforms,
+        uniforms: sharedUniforms,
         side: THREE.DoubleSide
     });
 
-    const grassMesh = new THREE.InstancedMesh(grassGeo, grassMat, instanceCount);
-    grassMesh.receiveShadow = true;
-    grassMesh.castShadow = true;
-
-    // --- Flower Setup ---
-    // 1. Stem (3D Cylinder)
-    const stemHeight = 1.2; 
-    const stemGeo = new THREE.CylinderGeometry(0.015, 0.02, stemHeight, 5);
+    const stemHeight = 1.3; 
+    const stemGeo = new THREE.CylinderGeometry(0.02, 0.025, stemHeight, 5);
     stemGeo.translate(0, stemHeight / 2, 0); 
-
-    const stemUniforms = {
-        uTime: { value: 0 },
-        uNoiseTexture: { value: assets.noise },
-        uColor: { value: new THREE.Color(0x2a4a2a) } // Darker, richer stem green
-    };
-
     const stemMat = new THREE.ShaderMaterial({
-        vertexShader: grassVertexShader, // Compatible shared shader (uses height based stiffness)
+        vertexShader: grassVertexShader,
         fragmentShader: stemFragmentShader,
-        uniforms: stemUniforms, 
+        uniforms: sharedUniforms,
         side: THREE.DoubleSide
     });
-    
-    // 2. Head (Flower Sprite)
-    const headGeo = new THREE.PlaneGeometry(0.5, 0.5);
-    // Orient to face somewhat upwards/forward
+
+    const headGeo = new THREE.PlaneGeometry(0.6, 0.6);
     headGeo.rotateX(-Math.PI / 8); 
-    headGeo.translate(0, stemHeight, 0); // Position exactly at top of stem
-
-    const headUniforms = {
-        uTime: { value: 0 },
-        uMap: { value: assets.flower },
-        uNoiseTexture: { value: assets.noise },
-        uColor: { value: new THREE.Color(0xffffff) }
-    };
-    
-    const flowerHeadFragmentShader = `
-        varying vec2 vUv;
-        varying float vShadow;
-        uniform sampler2D uMap;
-        uniform vec3 uColor;
-        void main() {
-            vec4 texColor = texture2D(uMap, vUv);
-            if (texColor.a < 0.4) discard;
-            
-            vec3 finalColor = texColor.rgb * uColor;
-            
-            // Apply cloud shadow
-            finalColor *= mix(0.6, 1.1, vShadow);
-            
-            gl_FragColor = vec4(finalColor, texColor.a);
-        }
-    `;
-
+    headGeo.translate(0, stemHeight, 0); 
     const headMat = new THREE.ShaderMaterial({
         vertexShader: flowerHeadVertexShader,
         fragmentShader: flowerHeadFragmentShader,
-        uniforms: headUniforms,
+        uniforms: sharedUniforms,
         side: THREE.DoubleSide,
-        transparent: false 
+        transparent: false,
+        alphaTest: 0.5
     });
 
-    const stemMesh = new THREE.InstancedMesh(stemGeo, stemMat, flowerCount);
-    stemMesh.receiveShadow = true;
-    stemMesh.castShadow = true;
+    // Create Chunks
+    const chunks = {};
+    const getChunkKey = (x, z) => `${Math.floor((x + GRID_HALF_WIDTH) / CHUNK_SIZE)}_${Math.floor((z + GRID_HALF_WIDTH) / CHUNK_SIZE)}`;
+    
+    // Helper to get or create chunk
+    const getChunk = (x, z) => {
+        const key = getChunkKey(x, z);
+        if (!chunks[key]) {
+            chunks[key] = new FoliageChunk(scene, grassGeo, grassMat, stemGeo, stemMat, headGeo, headMat, x, z, CHUNK_SIZE);
+        }
+        return chunks[key];
+    };
 
-    const headMesh = new THREE.InstancedMesh(headGeo, headMat, flowerCount);
-    headMesh.castShadow = true;
-
-    // --- Positioning Logic ---
+    // Raycaster for placement
     const dummy = new THREE.Object3D();
     const raycaster = new THREE.Raycaster();
     const down = new THREE.Vector3(0, -1, 0);
 
-    // Populate Grass
-    for (let i = 0; i < instanceCount; i++) {
+    // Generate Grass
+    for (let i = 0; i < GRASS_COUNT; i++) {
         const angle = Math.random() * Math.PI * 2;
-        // Distribute more densely in the center, sparse edges
-        const rNorm = Math.sqrt(Math.random()); // Even distribution fix, or keep biased?
-        const radius = rNorm * 28; // Slightly wider range
+        const rNorm = Math.sqrt(Math.random());
+        const radius = rNorm * 29; // Stay within bounds
         
         const x = Math.cos(angle) * radius;
         const z = Math.sin(angle) * radius;
@@ -306,28 +341,20 @@ export function createFoliage(scene, assets, terrainMesh) {
         if (intersects.length > 0) {
             const y = intersects[0].point.y;
             dummy.position.set(x, y, z);
-            
-            // Random rotation
             dummy.rotation.y = Math.random() * Math.PI * 2;
-            
-            // Random scale variation for natural look
-            const h = 0.7 + Math.random() * 0.6; // Height variation
-            const w = 0.8 + Math.random() * 0.4; // Width variation
+            const h = 0.6 + Math.random() * 0.7;
+            const w = 0.7 + Math.random() * 0.6;
             dummy.scale.set(w, h, w);
+            dummy.updateMatrix();
             
-            dummy.updateMatrix();
-            grassMesh.setMatrixAt(i, dummy.matrix);
-        } else {
-            dummy.position.set(0, -100, 0);
-            dummy.updateMatrix();
-            grassMesh.setMatrixAt(i, dummy.matrix);
+            getChunk(x, z).addGrass(dummy.matrix.clone());
         }
     }
 
-    // Populate Flowers
-    for (let i = 0; i < flowerCount; i++) {
+    // Generate Flowers
+    for (let i = 0; i < FLOWER_COUNT; i++) {
         const angle = Math.random() * Math.PI * 2;
-        const radius = Math.random() * 22;
+        const radius = Math.random() * 24;
         const x = Math.cos(angle) * radius;
         const z = Math.sin(angle) * radius;
 
@@ -338,34 +365,39 @@ export function createFoliage(scene, assets, terrainMesh) {
             const y = intersects[0].point.y;
             dummy.position.set(x, y, z);
             dummy.rotation.y = Math.random() * Math.PI * 2;
-            
-            const s = 0.8 + Math.random() * 0.4;
+            const s = 0.8 + Math.random() * 0.5;
             dummy.scale.set(s, s, s);
-
             dummy.updateMatrix();
-            stemMesh.setMatrixAt(i, dummy.matrix);
-            headMesh.setMatrixAt(i, dummy.matrix);
-        } else {
-             dummy.position.set(0, -100, 0);
-             dummy.updateMatrix();
-             stemMesh.setMatrixAt(i, dummy.matrix);
-             headMesh.setMatrixAt(i, dummy.matrix);
+
+            getChunk(x, z).addFlower(dummy.matrix.clone());
         }
     }
 
-    grassMesh.instanceMatrix.needsUpdate = true;
-    stemMesh.instanceMatrix.needsUpdate = true;
-    headMesh.instanceMatrix.needsUpdate = true;
+    // Build all chunks
+    Object.values(chunks).forEach(chunk => chunk.build());
 
-    scene.add(grassMesh);
-    scene.add(stemMesh);
-    scene.add(headMesh);
+    // Wind animation state
+    let windAngle = 0;
 
     return {
         update: (time) => {
-            uniforms.uTime.value = time;
-            stemUniforms.uTime.value = time;
-            headUniforms.uTime.value = time;
+            sharedUniforms.uTime.value = time;
+            
+            // Smoothly rotate wind direction over time for "swirling" effect
+            // But make it slow (large cycle)
+            windAngle = Math.sin(time * 0.05) * 0.5 + Math.cos(time * 0.02) * 0.5; 
+            
+            // Convert angle to vector
+            // Main direction is (1, 0) rotated by windAngle
+            const dirX = Math.cos(windAngle);
+            const dirZ = Math.sin(windAngle);
+            
+            sharedUniforms.uWindDirection.value.set(dirX, dirZ);
+            
+            // Modulate strength: Lulls and gusts
+            // Perlin-ish smooth oscillation
+            const surge = Math.sin(time * 0.3) * Math.sin(time * 0.13 + 2.0);
+            sharedUniforms.uWindStrength.value = 0.5 + surge * 0.4;
         }
     };
 }
