@@ -2,8 +2,8 @@ import * as THREE from 'three';
 
 // Helper to create tapered grass blade geometry
 function createBladeGeometry() {
-    // Width 0.1, Height 1.0, 4 vertical segments for bending
-    const geometry = new THREE.PlaneGeometry(0.1, 1.0, 1, 4);
+    // Width 0.12, Height 1.0, 5 vertical segments for smoother bending
+    const geometry = new THREE.PlaneGeometry(0.12, 1.0, 1, 5);
     geometry.translate(0, 0.5, 0); // Pivot at bottom
 
     const pos = geometry.attributes.position;
@@ -12,15 +12,14 @@ function createBladeGeometry() {
         const u = y / 1.0; // Normalized height
         
         // Taper Width: Convex curve for a grassy blade shape
-        // At u=0 (bottom), taper=1. At u=1 (top), taper=0
-        const taper = 1.0 - Math.pow(u, 1.5);
+        const taper = 1.0 - Math.pow(u, 2.0) * 0.6 - u * 0.4;
         
         let x = pos.getX(i);
         pos.setX(i, x * taper);
         
         // Add natural static curve (bend slightly forward/back)
-        // Gives volume even without wind
-        const curve = 0.15 * Math.pow(u, 2.0);
+        // Helps it catch light better
+        const curve = 0.2 * Math.pow(u, 2.0);
         pos.setZ(i, curve);
     }
     
@@ -28,137 +27,130 @@ function createBladeGeometry() {
     return geometry;
 }
 
- // Vertex Shader for Grass Wind (Procedural & Textured)
+// Shared wind logic to ensure grass, stems, and flowers move in sync
+const windShaderLogic = `
+    uniform float uTime;
+    uniform sampler2D uNoiseTexture;
+
+    vec3 getWindDisplacement(vec3 position, vec3 instancePos, float stiffness) {
+        // --- Wind Settings ---
+        vec2 windDir = normalize(vec2(0.6, 0.3)); // Dominant wind direction
+        float windSpeed = 0.12; // Slow, realistic breeze
+        float noiseScale = 0.035; // Larger scale = larger "waves"
+
+        // --- Sampling ---
+        // Scroll the noise texture along the wind direction
+        vec2 uv = instancePos.xz * noiseScale - windDir * uTime * windSpeed;
+        
+        // Sample two noise layers for turbulence
+        // Layer 1: Main waves
+        float nMain = texture2D(uNoiseTexture, uv).r;
+        // Layer 2: Faster, smaller ripples
+        float nTurb = texture2D(uNoiseTexture, uv * 2.7 + vec2(uTime * 0.05)).r;
+        
+        // Combine noise: dominantly the main wave, subtly the turbulence
+        float combinedNoise = nMain * 0.7 + nTurb * 0.3;
+        
+        // Shape the wind strength
+        // "Power" function makes gusts peakier and calms flat areas
+        float strength = pow(combinedNoise, 2.0) * 1.5 + 0.2; 
+        
+        // --- Directional Variance ---
+        // Wind isn't perfectly unidirectional. It swirls.
+        float localSwirl = sin(uTime * 0.2 + instancePos.x * 0.1 + instancePos.z * 0.1);
+        vec2 localDir = normalize(windDir + vec2(localSwirl * 0.3, -localSwirl * 0.1));
+
+        // --- Displacement ---
+        // Apply wind strength
+        vec3 windVec = vec3(localDir.x, 0.0, localDir.y) * strength;
+        
+        // Apply stiffness (how much this specific vertex can move)
+        // Typically stiffness is based on height^2 or height^3
+        vec3 disp = windVec * stiffness;
+        
+        // Cheap bending approximation (preserves length visually)
+        // As xz movement increases, y should decrease slightly
+        disp.y = -length(windVec) * 0.4 * stiffness;
+        
+        return disp;
+    }
+    
+    float getCloudShadow(vec3 instancePos) {
+        vec2 uv = instancePos.xz * 0.02 + vec2(uTime * 0.02);
+        return smoothstep(0.3, 0.7, texture2D(uNoiseTexture, uv).r);
+    }
+`;
+
 const grassVertexShader = `
     varying vec2 vUv;
-    varying float vCloud;
+    varying float vShadow;
     
-    uniform float uTime;
-    uniform sampler2D uNoiseTexture;
+    ${windShaderLogic}
 
     void main() {
         vUv = uv;
         
-        // World-space instance position (per blade)
         vec3 instancePos = vec3(instanceMatrix[3][0], instanceMatrix[3][1], instanceMatrix[3][2]);
+        vShadow = getCloudShadow(instancePos);
         
-        // --- Large-scale noise field for soft gust zones ---
-        // Slow-moving UVs for big, lazy patches of wind
-        vec2 noiseUV = instancePos.xz * 0.01 + vec2(uTime * 0.015, uTime * 0.008);
-        float noiseVal = texture2D(uNoiseTexture, noiseUV).r;
-        vCloud = noiseVal;
-
-        // Convert noise into "gust strength" with soft edges
-        float gust = smoothstep(0.35, 0.75, noiseVal);
-
-        // --- Time-varying wind direction (slowly drifting) ---
-        float baseAngle = 1.2; // base direction in radians (roughly from left to right)
-        float dirJitter = 0.4 * sin(uTime * 0.03); // very slow oscillation
-        float angle = baseAngle + dirJitter;
-        vec2 windDir = normalize(vec2(cos(angle), sin(angle)));
-
-        // --- Motion layers (all low-frequency, smooth) ---
-
-        // 1. Steady breeze: dominant, directional push
-        float steadyPhase = uTime * 0.25 + (instancePos.x + instancePos.z) * 0.05;
-        float steadyStrength = 0.18 + 0.04 * sin(steadyPhase);
+        // Calculate stiffness based on height (uv.y)
+        // Base is rigid (0), tip is loose (1)
+        float stiffness = pow(uv.y, 2.5);
         
-        // 2. Gust modulation: gently raises/lowers the steady breeze strength
-        float gustPhase = uTime * 0.12;
-        float gustWave = 0.5 + 0.5 * sin(gustPhase + noiseVal * 6.2831);
-        float gustStrength = mix(0.0, 0.22, gust * gustWave);
-
-        // 3. Very subtle local variation along the field (removes uniformity without jitter)
-        float fieldVariation = 0.03 * sin(uTime * 0.35 + instancePos.x * 0.15) * 
-                               0.03 * cos(uTime * 0.31 + instancePos.z * 0.11);
-
-        float totalStrength = steadyStrength + gustStrength + fieldVariation;
-
-        // Final wind vector in XZ plane
-        float windX = windDir.x * totalStrength;
-        float windZ = windDir.y * totalStrength;
-
-        // Stiffness gradient: base locked, tips fully flexible (smooth cubic)
-        float stiffness = pow(uv.y, 3.0);
+        // Get displacement
+        vec3 windOffset = getWindDisplacement(position, instancePos, stiffness);
         
-        vec3 finalPos = position;
-        finalPos.x += windX * stiffness;
-        finalPos.z += windZ * stiffness;
+        vec3 finalPos = position + windOffset;
         
         gl_Position = projectionMatrix * modelViewMatrix * instanceMatrix * vec4(finalPos, 1.0);
     }
 `;
 
- // Vertex Shader for Flower Head (Matches grass movement)
 const flowerHeadVertexShader = `
     varying vec2 vUv;
-    varying float vCloud;
+    varying float vShadow;
     
-    uniform float uTime;
-    uniform sampler2D uNoiseTexture;
+    ${windShaderLogic}
 
     void main() {
         vUv = uv;
         
         vec3 instancePos = vec3(instanceMatrix[3][0], instanceMatrix[3][1], instanceMatrix[3][2]);
+        vShadow = getCloudShadow(instancePos);
         
-        // --- Shared Wind Logic (kept in sync with grassVertexShader) ---
-        vec2 noiseUV = instancePos.xz * 0.01 + vec2(uTime * 0.015, uTime * 0.008);
-        float noiseVal = texture2D(uNoiseTexture, noiseUV).r;
-        vCloud = noiseVal;
-
-        float gust = smoothstep(0.35, 0.75, noiseVal);
-
-        float baseAngle = 1.2;
-        float dirJitter = 0.4 * sin(uTime * 0.03);
-        float angle = baseAngle + dirJitter;
-        vec2 windDir = normalize(vec2(cos(angle), sin(angle)));
-
-        float steadyPhase = uTime * 0.25 + (instancePos.x + instancePos.z) * 0.05;
-        float steadyStrength = 0.18 + 0.04 * sin(steadyPhase);
-        
-        float gustPhase = uTime * 0.12;
-        float gustWave = 0.5 + 0.5 * sin(gustPhase + noiseVal * 6.2831);
-        float gustStrength = mix(0.0, 0.22, gust * gustWave);
-
-        float fieldVariation = 0.03 * sin(uTime * 0.35 + instancePos.x * 0.15) * 
-                               0.03 * cos(uTime * 0.31 + instancePos.z * 0.11);
-
-        float totalStrength = steadyStrength + gustStrength + fieldVariation;
-
-        float windX = windDir.x * totalStrength;
-        float windZ = windDir.y * totalStrength;
-        // ---------------------------------------------------------------
-
-        // Flowers are at the very tip: they receive full deflection
+        // Flower heads are at the very top of the stem.
+        // The stem bends based on height. The top of the stem has max stiffness.
+        // So the head must also have max stiffness to stick to the stem tip.
         float stiffness = 1.0; 
         
-        vec3 finalPos = position;
-        finalPos.x += windX * stiffness;
-        finalPos.z += windZ * stiffness;
+        vec3 windOffset = getWindDisplacement(position, instancePos, stiffness);
+        
+        vec3 finalPos = position + windOffset;
         
         gl_Position = projectionMatrix * modelViewMatrix * instanceMatrix * vec4(finalPos, 1.0);
     }
 `;
 
-// Procedural Grass Shader (Gradient + Noise)
 const grassFragmentShader = `
     varying vec2 vUv;
-    varying float vCloud;
+    varying float vShadow;
     
     uniform vec3 uColorBottom;
     uniform vec3 uColorTop;
 
     void main() {
-        // Vertical gradient
         vec3 color = mix(uColorBottom, uColorTop, vUv.y);
         
-        // Cloud shadows and variety
-        float shadow = smoothstep(0.3, 0.8, vCloud);
-        color *= mix(0.6, 1.1, shadow); 
+        // Add subtle variations based on shadow
+        color *= mix(0.5, 1.1, vShadow);
         
-        // Fake Ambient Occlusion at the very bottom
-        color *= smoothstep(0.0, 0.15, vUv.y);
+        // Fake Ambient Occlusion
+        color *= smoothstep(0.0, 0.1, vUv.y);
+        
+        // Specular sheen for "realism"
+        // Simple trick: lighter top tips
+        float sheen = smoothstep(0.8, 1.0, vUv.y) * 0.2;
+        color += sheen;
 
         gl_FragColor = vec4(color, 1.0);
     }
@@ -166,22 +158,22 @@ const grassFragmentShader = `
 
 const stemFragmentShader = `
     varying vec2 vUv;
-    varying float vCloud;
+    varying float vShadow;
     uniform vec3 uColor;
 
     void main() {
         vec3 finalColor = uColor;
         
-        // Fake shading for 3D cylinder
-        float light = 0.6 + 0.4 * sin(vUv.x * 6.28); 
-        finalColor *= light;
+        // Cylinder shading approximation
+        // vUv.x wraps 0..1 around the cylinder
+        float light = 0.5 + 0.5 * sin((vUv.x + 0.25) * 6.28); 
+        finalColor *= 0.5 + 0.5 * light; // Soft lighting
 
-        // Gradient
-        finalColor *= mix(0.5, 1.0, vUv.y);
+        // Vertical gradient
+        finalColor *= mix(0.6, 1.0, vUv.y);
         
-        // Shadows
-        float shadow = smoothstep(0.3, 0.8, vCloud);
-        finalColor *= mix(0.6, 1.1, shadow);
+        // Cloud shadow
+        finalColor *= mix(0.5, 1.1, vShadow);
         
         gl_FragColor = vec4(finalColor, 1.0);
     }
@@ -197,8 +189,9 @@ export function createFoliage(scene, assets, terrainMesh) {
     const uniforms = {
         uTime: { value: 0 },
         uNoiseTexture: { value: assets.noise },
-        uColorBottom: { value: new THREE.Color(0x2d4c1e) }, // Dark organic green
-        uColorTop: { value: new THREE.Color(0x7bb661) }     // Fresh light green
+        // More realistic, less saturated, earthy greens
+        uColorBottom: { value: new THREE.Color(0x1a331a) }, 
+        uColorTop: { value: new THREE.Color(0x5a8a4a) }     
     };
 
     const grassMat = new THREE.ShaderMaterial({
@@ -214,27 +207,28 @@ export function createFoliage(scene, assets, terrainMesh) {
 
     // --- Flower Setup ---
     // 1. Stem (3D Cylinder)
-    const stemHeight = 1.1; 
-    const stemGeo = new THREE.CylinderGeometry(0.02, 0.025, stemHeight, 5);
+    const stemHeight = 1.2; 
+    const stemGeo = new THREE.CylinderGeometry(0.015, 0.02, stemHeight, 5);
     stemGeo.translate(0, stemHeight / 2, 0); 
 
     const stemUniforms = {
         uTime: { value: 0 },
         uNoiseTexture: { value: assets.noise },
-        uColor: { value: new THREE.Color(0x4a6b36) } 
+        uColor: { value: new THREE.Color(0x3a5a2a) } // Darker, richer stem green
     };
 
     const stemMat = new THREE.ShaderMaterial({
-        vertexShader: grassVertexShader, // Compatible shared shader
+        vertexShader: grassVertexShader, // Compatible shared shader (uses height based stiffness)
         fragmentShader: stemFragmentShader,
         uniforms: stemUniforms, 
         side: THREE.DoubleSide
     });
     
     // 2. Head (Flower Sprite)
-    const headGeo = new THREE.PlaneGeometry(0.4, 0.4);
-    headGeo.rotateX(-Math.PI / 6); 
-    headGeo.translate(0, stemHeight, 0); 
+    const headGeo = new THREE.PlaneGeometry(0.5, 0.5);
+    // Orient to face somewhat upwards/forward
+    headGeo.rotateX(-Math.PI / 8); 
+    headGeo.translate(0, stemHeight, 0); // Position exactly at top of stem
 
     const headUniforms = {
         uTime: { value: 0 },
@@ -243,19 +237,20 @@ export function createFoliage(scene, assets, terrainMesh) {
         uColor: { value: new THREE.Color(0xffffff) }
     };
     
-    // Use grassFragmentShader for flower head but with texture support?
-    // We need to re-add uMap support for the flower head specifically.
-    // Let's create a specific material for flower heads that supports texture.
     const flowerHeadFragmentShader = `
         varying vec2 vUv;
-        varying float vCloud;
+        varying float vShadow;
         uniform sampler2D uMap;
         uniform vec3 uColor;
         void main() {
             vec4 texColor = texture2D(uMap, vUv);
-            if (texColor.a < 0.5) discard;
+            if (texColor.a < 0.4) discard;
+            
             vec3 finalColor = texColor.rgb * uColor;
-            finalColor *= mix(0.7, 1.2, vCloud);
+            
+            // Apply cloud shadow
+            finalColor *= mix(0.6, 1.1, vShadow);
+            
             gl_FragColor = vec4(finalColor, texColor.a);
         }
     `;
