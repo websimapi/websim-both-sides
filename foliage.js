@@ -41,19 +41,31 @@ const grassVertexShader = `
         
         vec3 instancePos = vec3(instanceMatrix[3][0], instanceMatrix[3][1], instanceMatrix[3][2]);
         
-        // Sample noise for wind waves
-        vec2 noiseUV = instancePos.xz * 0.05 + vec2(uTime * 0.05, uTime * 0.02);
+        // Smooth, large-scale noise for gusts
+        // Slower time scale and larger texture sampling for natural transitions
+        vec2 noiseUV = instancePos.xz * 0.015 + vec2(uTime * 0.04, uTime * 0.01);
         float noiseVal = texture2D(uNoiseTexture, noiseUV).r;
         vCloud = noiseVal;
 
-        // Wind strength increases with height
-        // Squared response for stiffer bottom
-        float stiffness = pow(uv.y, 2.0);
+        // Gust curve: Smoothstep creates defined 'calm' and 'windy' patches
+        float gust = smoothstep(0.2, 0.7, noiseVal);
+
+        // Wind Physics Layers:
+        // 1. Base Breeze: Slow, constant, gentle sine wave
+        float baseSway = sin(uTime * 0.3 + instancePos.x * 0.2 + instancePos.z * 0.1) * 0.15;
         
-        // Calculate Sway
-        // Mix of global wind direction (noise) and local turbulence (sin)
-        float windX = sin(uTime * 1.0 + instancePos.x * 0.5) * 0.3 + (noiseVal - 0.5) * 1.5;
-        float windZ = cos(uTime * 0.8 + instancePos.z * 0.5) * 0.1 + (noiseVal - 0.5) * 0.5;
+        // 2. Gust Push: Directional force based on noise
+        float gustPush = gust * 0.4;
+        
+        // 3. Micro-Turbulence: Faster, small jitters (damped significantly)
+        float turbulence = sin(uTime * 1.2 + instancePos.x * 1.0) * 0.03 * (1.0 + gust);
+
+        // Composite Wind Vector
+        float windX = baseSway + gustPush + turbulence;
+        float windZ = cos(uTime * 0.2 + instancePos.x * 0.1) * 0.05 + (gustPush * 0.2);
+
+        // Stiffness Gradient: Bottom is fixed (0.0), Top is flexible (1.0)
+        float stiffness = pow(uv.y, 2.0);
         
         vec3 finalPos = position;
         finalPos.x += windX * stiffness;
@@ -76,15 +88,23 @@ const flowerHeadVertexShader = `
         
         vec3 instancePos = vec3(instanceMatrix[3][0], instanceMatrix[3][1], instanceMatrix[3][2]);
         
-        vec2 noiseUV = instancePos.xz * 0.05 + vec2(uTime * 0.05, uTime * 0.02);
+        // --- Shared Wind Logic (Must match grassVertexShader exactly) ---
+        vec2 noiseUV = instancePos.xz * 0.015 + vec2(uTime * 0.04, uTime * 0.01);
         float noiseVal = texture2D(uNoiseTexture, noiseUV).r;
         vCloud = noiseVal;
 
-        // Max wind effect (tip of stem)
+        float gust = smoothstep(0.2, 0.7, noiseVal);
+
+        float baseSway = sin(uTime * 0.3 + instancePos.x * 0.2 + instancePos.z * 0.1) * 0.15;
+        float gustPush = gust * 0.4;
+        float turbulence = sin(uTime * 1.2 + instancePos.x * 1.0) * 0.03 * (1.0 + gust);
+
+        float windX = baseSway + gustPush + turbulence;
+        float windZ = cos(uTime * 0.2 + instancePos.x * 0.1) * 0.05 + (gustPush * 0.2);
+        // ---------------------------------------------------------------
+
+        // Flowers are at the top of the stem, so they get 100% of the tip deflection
         float stiffness = 1.0; 
-        
-        float windX = sin(uTime * 1.0 + instancePos.x * 0.5) * 0.3 + (noiseVal - 0.5) * 1.5;
-        float windZ = cos(uTime * 0.8 + instancePos.z * 0.5) * 0.1 + (noiseVal - 0.5) * 0.5;
         
         vec3 finalPos = position;
         finalPos.x += windX * stiffness;
