@@ -140,6 +140,7 @@ const grassFragmentShader = `
     
     uniform vec3 uColorBottom;
     uniform vec3 uColorTop;
+    uniform vec2 uResolution;
 
     void main() {
         vec3 color = mix(uColorBottom, uColorTop, vUv.y);
@@ -150,6 +151,13 @@ const grassFragmentShader = `
         float sheen = smoothstep(0.7, 1.0, vUv.y) * 0.15;
         color += sheen;
 
+        // Split Screen Logic: Right side is gloomy
+        if (gl_FragCoord.x > uResolution.x * 0.5) {
+            float gray = dot(color, vec3(0.299, 0.587, 0.114));
+            // Dead grass: Darker, grayer
+            color = vec3(gray * 0.5); 
+        }
+
         gl_FragColor = vec4(color, 1.0);
     }
 `;
@@ -158,6 +166,7 @@ const stemFragmentShader = `
     varying vec2 vUv;
     varying float vShadow;
     uniform vec3 uColor;
+    uniform vec2 uResolution;
 
     void main() {
         vec3 finalColor = uColor;
@@ -168,6 +177,12 @@ const stemFragmentShader = `
 
         finalColor *= mix(0.6, 1.0, vUv.y);
         finalColor *= mix(0.5, 1.1, vShadow);
+
+        // Split Screen Logic
+        if (gl_FragCoord.x > uResolution.x * 0.5) {
+            float gray = dot(finalColor, vec3(0.299, 0.587, 0.114));
+            finalColor = vec3(gray * 0.4);
+        }
         
         gl_FragColor = vec4(finalColor, 1.0);
     }
@@ -178,12 +193,23 @@ const flowerHeadFragmentShader = `
     varying float vShadow;
     uniform sampler2D uMap;
     uniform vec3 uColor;
+    uniform vec2 uResolution;
+
     void main() {
         vec4 texColor = texture2D(uMap, vUv);
         if (texColor.a < 0.4) discard;
         
         vec3 finalColor = texColor.rgb * uColor;
         finalColor *= mix(0.6, 1.1, vShadow);
+
+        // Split Screen Logic
+        if (gl_FragCoord.x > uResolution.x * 0.5) {
+            // Sin City style: Deep Red
+            vec3 redColor = vec3(0.8, 0.02, 0.02);
+            // Maintain texture detail via luminance
+            float detail = dot(texColor.rgb, vec3(0.299, 0.587, 0.114));
+            finalColor = redColor * detail * 2.0 * mix(0.6, 1.1, vShadow);
+        }
         
         gl_FragColor = vec4(finalColor, texColor.a);
     }
@@ -258,7 +284,7 @@ class FoliageChunk {
     }
 }
 
-export function createFoliage(scene, assets, terrainMesh) {
+export function createFoliage(scene, assets, terrainMesh, globalUniforms) {
     const GRASS_COUNT = 35000; // Even more dense since culling is active!
     const FLOWER_COUNT = 300;
     
@@ -275,7 +301,8 @@ export function createFoliage(scene, assets, terrainMesh) {
         uColorBottom: { value: new THREE.Color(0x1a2e1a) }, 
         uColorTop: { value: new THREE.Color(0x5c8a4b) },
         uColor: { value: new THREE.Color(0x3a5a3a) }, // Stem color
-        uMap: { value: assets.flower }
+        uMap: { value: assets.flower },
+        uResolution: globalUniforms.uResolution
     };
 
     const grassGeo = createBladeGeometry();

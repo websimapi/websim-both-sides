@@ -74,9 +74,16 @@ const assets = {
 assets.terrain.wrapS = assets.terrain.wrapT = THREE.RepeatWrapping;
 assets.noise.wrapS = assets.noise.wrapT = THREE.RepeatWrapping;
 
+// Global Uniforms for Screen Split
+const globalUniforms = {
+    uResolution: { value: new THREE.Vector2() }
+};
+// Initialize resolution
+renderer.getDrawingBufferSize(globalUniforms.uResolution.value);
+
 // Create World
-const terrain = createTerrain(scene, assets.terrain);
-const foliageSystem = createFoliage(scene, assets, terrain.mesh);
+const terrain = createTerrain(scene, assets.terrain, globalUniforms);
+const foliageSystem = createFoliage(scene, assets, terrain.mesh, globalUniforms);
 
 // --- Animation Loop ---
 const clock = new THREE.Clock();
@@ -101,6 +108,7 @@ window.addEventListener('resize', () => {
     camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.getDrawingBufferSize(globalUniforms.uResolution.value);
 });
 
 // Start loop

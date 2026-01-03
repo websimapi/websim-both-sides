@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 
-export function createTerrain(scene, texture) {
+export function createTerrain(scene, texture, globalUniforms) {
     const geometry = new THREE.PlaneGeometry(60, 60, 128, 128);
     
     // Displace vertices for uneven terrain
@@ -26,6 +26,22 @@ export function createTerrain(scene, texture) {
         metalness: 0.1,
         color: 0x555555 // Darken the texture slightly
     });
+
+    material.onBeforeCompile = (shader) => {
+        shader.uniforms.uResolution = globalUniforms.uResolution;
+        shader.fragmentShader = 'uniform vec2 uResolution;\n' + shader.fragmentShader;
+        shader.fragmentShader = shader.fragmentShader.replace(
+            '#include <dithering_fragment>',
+            `
+            #include <dithering_fragment>
+            if (gl_FragCoord.x > uResolution.x * 0.5) {
+                float gray = dot(gl_FragColor.rgb, vec3(0.299, 0.587, 0.114));
+                // Dark, gloomy terrain
+                gl_FragColor = vec4(vec3(gray * 0.4), gl_FragColor.a);
+            }
+            `
+        );
+    };
 
     const mesh = new THREE.Mesh(geometry, material);
     mesh.receiveShadow = true;
